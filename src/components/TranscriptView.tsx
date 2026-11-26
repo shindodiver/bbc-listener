@@ -73,7 +73,10 @@ export default function TranscriptView({
     for (let i = 0; i < segs.length; i++) {
       const seg = segs[i];
       const nextStart = i < segs.length - 1 ? segs[i + 1].start : seg.end + 5;
-      if (currentTime >= seg.start && currentTime < Math.max(seg.end, nextStart)) {
+      if (
+        currentTime >= seg.start &&
+        currentTime < Math.max(seg.end, nextStart)
+      ) {
         return seg.id;
       }
     }
@@ -155,7 +158,7 @@ export default function TranscriptView({
           </button>
         </div>
 
-        {/* 概要の開閉＆自動追従トグル */}
+        {/* 概要の開閉＆自動追従トグル・再生成ボタン */}
         <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-2.5">
           <button
             type="button"
@@ -181,11 +184,13 @@ export default function TranscriptView({
                 type="button"
                 onClick={() => onGenerateTranscript(true)}
                 disabled={isTranscribing}
-                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
-                title="AI文字起こしを再生成"
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-700 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700 active:scale-95 disabled:opacity-50"
+                title="キャッシュを破棄してAI文字起こしを再生成"
               >
                 <RefreshCw
-                  className={`h-3 w-3 ${isTranscribing ? "animate-spin" : ""}`}
+                  className={`h-3 w-3 text-rose-600 ${
+                    isTranscribing ? "animate-spin" : ""
+                  }`}
                 />
                 <span>再生成</span>
               </button>
@@ -213,7 +218,7 @@ export default function TranscriptView({
         )}
       </div>
 
-      {/* 文字起こし未生成時の生成カード */}
+      {/* 文字起こし未生成時（または再生成中）の生成カード */}
       {!transcript && (
         <div className="rounded-2xl border border-slate-200 bg-white p-5 text-center shadow-xs">
           <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-rose-50 text-rose-600">
@@ -232,7 +237,7 @@ export default function TranscriptView({
 
           <p className="mx-auto mt-1.5 max-w-xs text-xs leading-relaxed text-slate-500">
             {isTranscribing
-              ? "BBCのオリジナルMP3音声をGemini 3.8 Flashで解析しています。完了まで20〜45秒ほどお待ちください。"
+              ? "BBCのオリジナルMP3音声を取得し、Gemini APIで解析しています。完了まで20〜45秒ほどお待ちください。"
               : "音声からタイムスタンプ付き英文スクリプトと重要イディオムを自動抽出します。一度生成すると端末に保存され、次回から即座に表示されます。"}
           </p>
 
@@ -320,9 +325,9 @@ export default function TranscriptView({
             </div>
           )}
 
-          {/* タップ操作ガイド */}
+          {/* 文字起こしヘッダー（タップ操作ガイド＆小「再生成」ボタン） */}
           <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-[11px] text-slate-500">
-            <div className="flex flex-wrap items-center gap-3">
+            <div className="flex flex-wrap items-center gap-2.5">
               <span className="inline-flex items-center gap-1">
                 <span className="inline-block border-b-2 border-dashed border-rose-500 font-semibold text-rose-700">
                   破線下線
@@ -333,10 +338,23 @@ export default function TranscriptView({
                 <span className="inline-block rounded bg-rose-100 px-1 font-semibold text-rose-800 underline decoration-rose-500 decoration-2">
                   実線ハイライト
                 </span>
-                <span>= ノート記録済</span>
+                <span>= 記録済</span>
               </span>
             </div>
-            <span>単語タップで辞書解説</span>
+
+            <button
+              type="button"
+              onClick={() => onGenerateTranscript(true)}
+              disabled={isTranscribing}
+              className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-600 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700 active:scale-95 disabled:opacity-50"
+            >
+              <RefreshCw
+                className={`h-3 w-3 text-rose-600 ${
+                  isTranscribing ? "animate-spin" : ""
+                }`}
+              />
+              <span>再生成</span>
+            </button>
           </div>
 
           {/* セグメント一覧 */}
@@ -443,9 +461,7 @@ export default function TranscriptView({
                         <button
                           key={idx}
                           type="button"
-                          onClick={() =>
-                            onSelectTerm(token.text, false, seg)
-                          }
+                          onClick={() => onSelectTerm(token.text, false, seg)}
                           className={`inline rounded px-0.5 transition ${
                             isSelectedToken
                               ? "bg-rose-600 font-semibold text-white"

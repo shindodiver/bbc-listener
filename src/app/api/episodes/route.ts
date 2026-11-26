@@ -27,20 +27,24 @@ function stripHtmlTags(input: string): string {
     .trim();
 }
 
-function extractTag(xmlBlock: string, tagName: string): string {
+function extractTagFromItem(itemXml: string, tagName: string): string {
+  const escapedTag = tagName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const regex = new RegExp(
-    `<${tagName}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tagName}>`,
+    `<${escapedTag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${escapedTag}>`,
     "i"
   );
-  const match = regex.exec(xmlBlock);
+  const match = regex.exec(itemXml);
   if (!match) return "";
   return decodeHtmlEntities(match[1].trim());
 }
 
-function extractEnclosureUrl(xmlBlock: string): string {
-  const regex = /<enclosure[^>]*\burl=["']([^"']+)["'][^>]*>/i;
-  const match = regex.exec(xmlBlock);
-  return match ? decodeHtmlEntities(match[1].trim()) : "";
+function extractEnclosureUrlFromItem(itemXml: string): string {
+  const regex = /<enclosure\b[^>]*?\burl=["']([^"']+)["'][^>]*>/i;
+  const match = regex.exec(itemXml);
+  if (!match) return "";
+  const rawUrl = decodeHtmlEntities(match[1].trim());
+  // http:// の場合は https:// に統一してリダイレクト・Mixed Content問題を防止
+  return rawUrl.replace(/^http:\/\//i, "https://");
 }
 
 function formatDuration(rawDuration: string): string | undefined {
@@ -55,25 +59,33 @@ function formatDuration(rawDuration: string): string | undefined {
   return trimmed;
 }
 
+/**
+ * 必ず <item>...</item> ブロック単位で分割してから、
+ * 各 <item> ブロックの内部だけで title, guid, pubDate, description, enclosure url を抽出する。
+ * これにより <channel> 直下の <title> や <description> とインデックスが絶対にズレない。
+ */
 function parseBbcRss(xml: string, limit = 20): Episode[] {
-  const itemRegex = /<item(?:\s[^>]*)?>([\s\S]*?)<\/item>/gi;
+  const rawBlocks = xml.split(/<item(?:\s[^>]*)?>/i).slice(1);
   const episodes: Episode[] = [];
-  let match: RegExpExecArray | null;
 
-  while ((match = itemRegex.exec(xml)) !== null && episodes.length < limit) {
-    const itemXml = match[1];
-    const audioUrl = extractEnclosureUrl(itemXml);
-    if (!audioUrl) continue;
+  for (const block of rawBlocks) {
+    if (episodes.length >= limit) break;
 
-    const guid = extractTag(itemXml, "guid") || audioUrl;
-    const title = extractTag(itemXml, "title") || "6 Minute English";
-    const pubDate = extractTag(itemXml, "pubDate") || "";
+    const closeIdx = block.search(/<\/item>/i);
+    const itemXml = closeIdx !== -1 ? block.slice(0, closeIdx) : block;
+
+    const audioUrl = extractEnclosureUrlFromItem(itemXml);
+    const title = extractTagFromItem(itemXml, "title");
+    const guid = extractTagFromItem(itemXml, "guid") || audioUrl;
+    const pubDate = extractTagFromItem(itemXml, "pubDate");
     const rawDesc =
-      extractTag(itemXml, "description") ||
-      extractTag(itemXml, "itunes:summary") ||
+      extractTagFromItem(itemXml, "description") ||
+      extractTagFromItem(itemXml, "itunes:summary") ||
       "";
     const description = stripHtmlTags(rawDesc);
-    const rawDuration = extractTag(itemXml, "itunes:duration");
+    const rawDuration = extractTagFromItem(itemXml, "itunes:duration");
+
+    if (!audioUrl || !title) continue;
 
     episodes.push({
       id: guid,
@@ -91,16 +103,18 @@ function parseBbcRss(xml: string, limit = 20): Episode[] {
 export async function GET() {
   try {
     const response = await fetch(BBC_RSS_URL, {
+      redirect: "follow",
       headers: {
-        "User-Agent":
-          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        "User-Agent": "Mozilla/5.0",
         Accept: "application/rss+xml, application/xml, text/xml, */*",
       },
-      next: { revalidate: 1800 },
+      cache: "no-store",
     });
 
     if (!response.ok) {
-      throw new Error(`RSSフィードの取得に失敗しました (HTTP ${response.status})`);
+      throw new Error(
+        `RSSフィードの取得に失敗しました (HTTP ${response.status})`
+      );
     }
 
     const xml = await response.text();

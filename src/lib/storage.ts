@@ -1,7 +1,8 @@
-import { TranscriptData, VocabEntry, WordDefinition } from "@/types";
+import { Episode, TranscriptData, VocabEntry, WordDefinition } from "@/types";
 
 const STORAGE_KEYS = {
-  TRANSCRIPT_PREFIX: "bbc6min_transcript_v1_",
+  TRANSCRIPT_PREFIX: "bbc6min_transcript_v2_",
+  LEGACY_TRANSCRIPT_PREFIX: "bbc6min_transcript_v1_",
   DEFINE_CACHE: "bbc6min_define_cache_v1",
   VOCAB_LIST: "bbc6min_vocab_list_v1",
   LAST_EPISODE_ID: "bbc6min_last_episode_id_v1",
@@ -9,58 +10,82 @@ const STORAGE_KEYS = {
 } as const;
 
 function isBrowser(): boolean {
-  return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
+  return (
+    typeof window !== "undefined" && typeof window.localStorage !== "undefined"
+  );
 }
 
-// --- 文字起こしキャッシュ ---
+// --- 文字起こしキャッシュ（id + audioUrl の複合キー） ---
 
-export function getCachedTranscript(episodeId: string): TranscriptData | null {
-  if (!isBrowser()) return null;
+export function makeTranscriptCacheKey(
+  episodeId: string,
+  audioUrl: string
+): string {
+  return `${STORAGE_KEYS.TRANSCRIPT_PREFIX}${episodeId.trim()}__${audioUrl.trim()}`;
+}
+
+export function getCachedTranscript(
+  episodeId: string,
+  audioUrl: string
+): TranscriptData | null {
+  if (!isBrowser() || !episodeId || !audioUrl) return null;
   try {
-    const raw = localStorage.getItem(`${STORAGE_KEYS.TRANSCRIPT_PREFIX}${episodeId}`);
+    const key = makeTranscriptCacheKey(episodeId, audioUrl);
+    const raw = localStorage.getItem(key);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as TranscriptData;
     if (!parsed || !Array.isArray(parsed.segments)) return null;
+    if (parsed.episodeId && parsed.episodeId !== episodeId) return null;
+    if (parsed.audioUrl && parsed.audioUrl !== audioUrl) return null;
     return parsed;
   } catch {
     return null;
   }
 }
 
-export function setCachedTranscript(episodeId: string, data: TranscriptData): void {
-  if (!isBrowser()) return;
+export function setCachedTranscript(
+  episodeId: string,
+  audioUrl: string,
+  data: TranscriptData
+): void {
+  if (!isBrowser() || !episodeId || !audioUrl) return;
   try {
+    const key = makeTranscriptCacheKey(episodeId, audioUrl);
     const payload: TranscriptData = {
       ...data,
+      episodeId,
+      audioUrl,
       updatedAt: new Date().toISOString(),
     };
-    localStorage.setItem(`${STORAGE_KEYS.TRANSCRIPT_PREFIX}${episodeId}`, JSON.stringify(payload));
+    localStorage.setItem(key, JSON.stringify(payload));
+    // 旧バージョンのキャッシュがあれば削除
+    localStorage.removeItem(`${STORAGE_KEYS.LEGACY_TRANSCRIPT_PREFIX}${episodeId}`);
   } catch (e) {
     console.warn("文字起こしキャッシュの保存に失敗しました:", e);
   }
 }
 
-export function removeCachedTranscript(episodeId: string): void {
+export function removeCachedTranscript(
+  episodeId: string,
+  audioUrl: string
+): void {
   if (!isBrowser()) return;
   try {
-    localStorage.removeItem(`${STORAGE_KEYS.TRANSCRIPT_PREFIX}${episodeId}`);
+    const key = makeTranscriptCacheKey(episodeId, audioUrl);
+    localStorage.removeItem(key);
+    localStorage.removeItem(`${STORAGE_KEYS.LEGACY_TRANSCRIPT_PREFIX}${episodeId}`);
   } catch {
     // ignore
   }
 }
 
-export function getAllCachedTranscriptIds(): Set<string> {
+export function getCachedEpisodeIdSet(episodes: Episode[]): Set<string> {
   const result = new Set<string>();
   if (!isBrowser()) return result;
-  try {
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key && key.startsWith(STORAGE_KEYS.TRANSCRIPT_PREFIX)) {
-        result.add(key.slice(STORAGE_KEYS.TRANSCRIPT_PREFIX.length));
-      }
+  for (const ep of episodes) {
+    if (getCachedTranscript(ep.id, ep.audioUrl)) {
+      result.add(ep.id);
     }
-  } catch {
-    // ignore
   }
   return result;
 }
@@ -70,10 +95,16 @@ export function getAllCachedTranscriptIds(): Set<string> {
 const memoryDefineCache = new Map<string, WordDefinition>();
 
 function makeDefineCacheKey(term: string, context: string): string {
-  return `${term.trim().toLowerCase()}__${context.trim().slice(0, 120).toLowerCase()}`;
+  return `${term.trim().toLowerCase()}__${context
+    .trim()
+    .slice(0, 120)
+    .toLowerCase()}`;
 }
 
-export function getCachedDefinition(term: string, context: string): WordDefinition | null {
+export function getCachedDefinition(
+  term: string,
+  context: string
+): WordDefinition | null {
   const exactKey = makeDefineCacheKey(term, context);
   const termOnlyKey = term.trim().toLowerCase();
 
@@ -100,7 +131,11 @@ export function getCachedDefinition(term: string, context: string): WordDefiniti
   }
 }
 
-export function setCachedDefinition(term: string, context: string, definition: WordDefinition): void {
+export function setCachedDefinition(
+  term: string,
+  context: string,
+  definition: WordDefinition
+): void {
   const exactKey = makeDefineCacheKey(term, context);
   const termOnlyKey = term.trim().toLowerCase();
   const normalizedKey = definition.term.trim().toLowerCase();
@@ -152,7 +187,10 @@ export function saveVocabList(list: VocabEntry[]): void {
   }
 }
 
-export function findVocabEntry(term: string, surfaceTerm?: string): VocabEntry | undefined {
+export function findVocabEntry(
+  term: string,
+  surfaceTerm?: string
+): VocabEntry | undefined {
   const list = getVocabList();
   const t = term.trim().toLowerCase();
   const s = surfaceTerm?.trim().toLowerCase();
@@ -160,7 +198,8 @@ export function findVocabEntry(term: string, surfaceTerm?: string): VocabEntry |
     const itemTerm = item.term.trim().toLowerCase();
     const itemSurface = item.surfaceTerm?.trim().toLowerCase();
     if (itemTerm === t || (s && itemTerm === s)) return true;
-    if (itemSurface && (itemSurface === t || (s && itemSurface === s))) return true;
+    if (itemSurface && (itemSurface === t || (s && itemSurface === s)))
+      return true;
     return false;
   });
 }

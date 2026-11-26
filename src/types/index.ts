@@ -16,6 +16,8 @@ export interface TranscriptSegment {
 }
 
 export interface TranscriptData {
+  episodeId?: string;
+  audioUrl?: string;
   segments: TranscriptSegment[];
   idioms: string[];
   updatedAt?: string;

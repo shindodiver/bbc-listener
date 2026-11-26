@@ -18,13 +18,13 @@ import {
   WordDefinition,
 } from "@/types";
 import {
-  findVocabEntry,
-  getAllCachedTranscriptIds,
   getAutoScrollPref,
   getCachedDefinition,
+  getCachedEpisodeIdSet,
   getCachedTranscript,
   getLastEpisodeId,
   getVocabList,
+  removeCachedTranscript,
   saveVocabList,
   setAutoScrollPref,
   setCachedDefinition,
@@ -44,6 +44,7 @@ export default function HomePage() {
   // エピソード関連
   const [episodes, setEpisodes] = useState<Episode[]>([]);
   const [selectedEpisode, setSelectedEpisode] = useState<Episode | null>(null);
+  const selectedEpisodeRef = useRef<Episode | null>(null);
   const [isLoadingEpisodes, setIsLoadingEpisodes] = useState(true);
   const [episodesError, setEpisodesError] = useState<string | null>(null);
   const [isEpisodeModalOpen, setIsEpisodeModalOpen] = useState(false);
@@ -53,7 +54,9 @@ export default function HomePage() {
   const [cachedEpisodeIds, setCachedEpisodeIds] = useState<Set<string>>(
     new Set()
   );
-  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [transcribingEpisodeId, setTranscribingEpisodeId] = useState<
+    string | null
+  >(null);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
 
@@ -84,21 +87,21 @@ export default function HomePage() {
     setIsLoadingEpisodes(true);
     setEpisodesError(null);
     try {
-      const res = await fetch("/api/episodes");
+      const res = await fetch("/api/episodes", { cache: "no-store" });
       const data = await res.json();
       if (!res.ok || !Array.isArray(data.episodes)) {
-        throw new Error(
-          data.error || "エピソード一覧の取得に失敗しました。"
-        );
+        throw new Error(data.error || "エピソード一覧の取得に失敗しました。");
       }
 
       const list: Episode[] = data.episodes;
       setEpisodes(list);
+      setCachedEpisodeIds(getCachedEpisodeIdSet(list));
 
       const savedEpisodeId = getLastEpisodeId();
       const initialEp =
         list.find((e) => e.id === savedEpisodeId) || list[0] || null;
       if (initialEp) {
+        selectedEpisodeRef.current = initialEp;
         setSelectedEpisode(initialEp);
       }
     } catch (e) {
@@ -115,17 +118,22 @@ export default function HomePage() {
   useEffect(() => {
     setVocabList(getVocabList());
     setAutoScroll(getAutoScrollPref());
-    setCachedEpisodeIds(getAllCachedTranscriptIds());
     fetchEpisodes();
   }, [fetchEpisodes]);
 
-  // エピソード切替時：キャッシュ済み文字起こしがあれば即座に読み込む
+  // エピソード切替時：selectedEpisodeRef を同期し、id + audioUrl に一致するキャッシュのみ読み込む
   useEffect(() => {
+    selectedEpisodeRef.current = selectedEpisode;
     if (!selectedEpisode) return;
+
     setLastEpisodeId(selectedEpisode.id);
     setTranscribeError(null);
+    setSheetOpen(false);
 
-    const cached = getCachedTranscript(selectedEpisode.id);
+    const cached = getCachedTranscript(
+      selectedEpisode.id,
+      selectedEpisode.audioUrl
+    );
     setTranscript(cached);
 
     // 音声要素のソース更新
@@ -133,6 +141,7 @@ export default function HomePage() {
     if (audio) {
       const targetUrl = selectedEpisode.audioUrl;
       if (audio.src !== targetUrl) {
+        audio.pause();
         audio.src = targetUrl;
         audio.playbackRate = playbackSpeed;
         audio.load();
@@ -251,28 +260,37 @@ export default function HomePage() {
     }
   }, []);
 
-  // AI文字起こし実行
+  // AI文字起こし実行（リクエスト開始時のエピソードID・音声URLと現在選択中のエピソードを厳密に照合）
   const handleGenerateTranscript = useCallback(
     async (forceRegenerate = false) => {
       if (!selectedEpisode) return;
 
-      if (!forceRegenerate) {
-        const cached = getCachedTranscript(selectedEpisode.id);
+      const reqEpisodeId = selectedEpisode.id;
+      const reqAudioUrl = selectedEpisode.audioUrl;
+      const reqTitle = selectedEpisode.title;
+
+      if (forceRegenerate) {
+        removeCachedTranscript(reqEpisodeId, reqAudioUrl);
+        setTranscript(null);
+        setCachedEpisodeIds(getCachedEpisodeIdSet(episodes));
+      } else {
+        const cached = getCachedTranscript(reqEpisodeId, reqAudioUrl);
         if (cached) {
           setTranscript(cached);
           return;
         }
       }
 
-      setIsTranscribing(true);
+      setTranscribingEpisodeId(reqEpisodeId);
       setTranscribeError(null);
+
       try {
         const res = await fetch("/api/transcribe", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            audioUrl: selectedEpisode.audioUrl,
-            episodeTitle: selectedEpisode.title,
+            audioUrl: reqAudioUrl,
+            episodeTitle: reqTitle,
           }),
         });
 
@@ -284,25 +302,42 @@ export default function HomePage() {
         }
 
         const transcriptData: TranscriptData = {
+          episodeId: reqEpisodeId,
+          audioUrl: reqAudioUrl,
           segments: data.segments || [],
           idioms: data.idioms || [],
           updatedAt: new Date().toISOString(),
         };
 
-        setCachedTranscript(selectedEpisode.id, transcriptData);
-        setTranscript(transcriptData);
-        setCachedEpisodeIds(getAllCachedTranscriptIds());
+        // リクエスト対象エピソードのキャッシュとして保存
+        setCachedTranscript(reqEpisodeId, reqAudioUrl, transcriptData);
+        setCachedEpisodeIds(getCachedEpisodeIdSet(episodes));
+
+        // リクエスト開始時のID・audioUrlと現在選択中のID・audioUrlが一致する場合のみ画面を更新
+        const currentEp = selectedEpisodeRef.current;
+        if (
+          currentEp &&
+          currentEp.id === reqEpisodeId &&
+          currentEp.audioUrl === reqAudioUrl
+        ) {
+          setTranscript(transcriptData);
+        }
       } catch (e) {
-        setTranscribeError(
-          e instanceof Error
-            ? e.message
-            : "文字起こし処理に失敗しました。"
-        );
+        const currentEp = selectedEpisodeRef.current;
+        if (currentEp && currentEp.id === reqEpisodeId) {
+          setTranscribeError(
+            e instanceof Error
+              ? e.message
+              : "文字起こし処理に失敗しました。"
+          );
+        }
       } finally {
-        setIsTranscribing(false);
+        setTranscribingEpisodeId((prev) =>
+          prev === reqEpisodeId ? null : prev
+        );
       }
     },
-    [selectedEpisode]
+    [selectedEpisode, episodes]
   );
 
   // 自動追従スクロール切替
@@ -414,12 +449,10 @@ export default function HomePage() {
     if (!definition || !selectedEpisode || !selectedSegment) return;
 
     if (currentSavedEntry) {
-      // すでに記録済みの場合は解除
       const updated = vocabList.filter((v) => v.id !== currentSavedEntry.id);
       setVocabList(updated);
       saveVocabList(updated);
     } else {
-      // 新規記録
       const newEntry: VocabEntry = {
         ...definition,
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -479,12 +512,17 @@ export default function HomePage() {
       const targetEp = episodes.find((e) => e.id === episodeId);
       if (targetEp) {
         pendingSeekRef.current = timestamp;
+        selectedEpisodeRef.current = targetEp;
         setSelectedEpisode(targetEp);
       } else {
         handleSeekAndPlay(timestamp);
       }
     },
     [selectedEpisode, episodes, handleSeekAndPlay]
+  );
+
+  const isCurrentEpisodeTranscribing = Boolean(
+    selectedEpisode && transcribingEpisodeId === selectedEpisode.id
   );
 
   return (
@@ -596,7 +634,7 @@ export default function HomePage() {
             episode={selectedEpisode}
             episodesCount={episodes.length}
             transcript={transcript}
-            isTranscribing={isTranscribing}
+            isTranscribing={isCurrentEpisodeTranscribing}
             transcribeError={transcribeError}
             currentTime={currentTime}
             autoScroll={autoScroll}
@@ -684,7 +722,10 @@ export default function HomePage() {
         cachedEpisodeIds={cachedEpisodeIds}
         isLoading={isLoadingEpisodes}
         onClose={() => setIsEpisodeModalOpen(false)}
-        onSelectEpisode={(ep) => setSelectedEpisode(ep)}
+        onSelectEpisode={(ep) => {
+          selectedEpisodeRef.current = ep;
+          setSelectedEpisode(ep);
+        }}
         onRefresh={fetchEpisodes}
       />
 

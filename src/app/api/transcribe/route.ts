@@ -10,6 +10,8 @@ const MODEL_FALLBACK_ORDER = [
   "gemini-3.8-flash",
 ] as const;
 
+const MIN_AUDIO_BYTES = 50 * 1024; // 50KB
+
 function is503Or429Error(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   const err = error as { status?: number; code?: number; message?: string };
@@ -36,14 +38,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         {
           error:
-            "環境変数 GEMINI_API_KEY が設定されていません。.env.local に GEMINI_API_KEY を設定してください。",
+            "環境変数 GEMINI_API_KEY が設定されていません。.env.local または Vercel の環境変数に GEMINI_API_KEY を設定してください。",
         },
         { status: 400 }
       );
     }
 
     const body = await req.json();
-    const { audioUrl, episodeTitle } = body as {
+    const { audioUrl } = body as {
       audioUrl?: string;
       episodeTitle?: string;
     };
@@ -55,11 +57,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // サーバー側でオリジナルMP3を取得
+    // サーバー側でリダイレクトを追跡して確実にオリジナルMP3を取得
     const audioRes = await fetch(audioUrl, {
+      redirect: "follow",
+      cache: "no-store",
       headers: {
-        "User-Agent":
-          "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+        "User-Agent": "Mozilla/5.0",
+        Accept: "audio/mpeg, audio/*, */*",
       },
     });
 
@@ -72,26 +76,55 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const rawContentType = (
+      audioRes.headers.get("content-type") || ""
+    ).toLowerCase();
+
+    // Content-Type が audio/ を含むか検証（HTMLエラーページ等でないか確認）
+    if (!rawContentType.includes("audio/")) {
+      return NextResponse.json(
+        {
+          error: `取得したURLから音声データが返されませんでした (Content-Type: ${
+            rawContentType || "不明"
+          })。`,
+        },
+        { status: 502 }
+      );
+    }
+
     const arrayBuffer = await audioRes.arrayBuffer();
+
+    // サイズが 50KB 以上あるか検証
+    if (arrayBuffer.byteLength < MIN_AUDIO_BYTES) {
+      return NextResponse.json(
+        {
+          error: `取得した音声データのサイズが小さすぎます (${Math.round(
+            arrayBuffer.byteLength / 1024
+          )}KB)。有効なMP3ファイルではありません。`,
+        },
+        { status: 502 }
+      );
+    }
+
     const base64Audio = Buffer.from(arrayBuffer).toString("base64");
-    const contentType =
-      audioRes.headers.get("content-type")?.split(";")[0] || "audio/mpeg";
+    const mimeType = rawContentType.split(";")[0].trim() || "audio/mpeg";
 
     const ai = new GoogleGenAI({ apiKey });
 
-    const prompt = `You are an expert English transcription assistant for BBC Learning English "6 Minute English".
-Episode Title: ${episodeTitle || "6 Minute English"}
+    const prompt = `あなたは英語音声の文字起こし専門アシスタントです。
+【最重要ルール】
+添付された音声データの内容だけを忠実に文字起こしすること。内容が聞き取れない場合でも別のエピソードを推測・創作しないこと。
+必ず添付されたMP3音声で実際に話されている英会話のみを、最初から最後まで正確に文字起こししてください。
 
-Task:
-1. Transcribe the entire English audio accurately from start to finish.
-2. Divide the transcript into natural segments of 1 to 2 sentences each (typically 4 to 14 seconds per segment) so learners can easily follow along on a smartphone screen.
-3. For each segment, provide:
-   - "id": sequential string id like "seg-1", "seg-2", ...
-   - "start": exact start timestamp in seconds from the beginning of the audio (number, e.g. 0, 6.5, 14.2)
-   - "end": exact end timestamp in seconds (number, e.g. 6.5, 14.2, 22.0)
-   - "speaker": speaker name inferred from the dialogue (e.g. "Neil", "Beth", "Georgie", "Rob", "Pippa", "Sam", "Intro", "Guest")
-   - "text": exact English transcript for that segment
-4. Extract "idioms": an array of 6 to 15 important English idioms, phrasal verbs, collocations, or key multi-word expressions that actually appear in the transcript. Write each idiom using the exact phrase or words that appear in the segment texts so they can be matched and highlighted in the transcript.`;
+出力仕様:
+1. 音声の最初から最後まで、1〜2文ごと（目安として4〜15秒程度）の自然なセグメントに分割する。
+2. 各セグメント ("segments") には以下を含める:
+   - "id": "seg-1", "seg-2", ... の連番
+   - "start": 音声冒頭からの正確な開始秒数（数値、例: 0, 6.5, 14.2）
+   - "end": 音声冒頭からの正確な終了秒数（数値、例: 6.5, 14.2, 22.0）
+   - "speaker": 音声内で実際に発話している話者名（例: "Neil", "Beth", "Georgie", "Rob", "Pippa", "Guest" など、音声内で名乗っている名前）
+   - "text": 実際に発話された英語スクリプト全文
+3. "idioms": この音声のスクリプト内に実際に登場する重要な英語イディオム・熟語・句動詞・定型表現（6〜15個）の配列。本文中の表記と一致する文字列で抽出すること。`;
 
     const generateForModel = (model: string) =>
       ai.models.generateContent({
@@ -102,7 +135,7 @@ Task:
             parts: [
               {
                 inlineData: {
-                  mimeType: contentType,
+                  mimeType,
                   data: base64Audio,
                 },
               },
@@ -113,13 +146,15 @@ Task:
           },
         ],
         config: {
+          temperature: 0.1,
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
             properties: {
               segments: {
                 type: Type.ARRAY,
-                description: "Time-aligned transcript segments for the episode",
+                description:
+                  "Time-aligned verbatim transcript segments of the attached audio only",
                 items: {
                   type: Type.OBJECT,
                   properties: {
@@ -137,11 +172,12 @@ Task:
                     },
                     speaker: {
                       type: Type.STRING,
-                      description: "Speaker name",
+                      description: "Speaker name heard in the audio",
                     },
                     text: {
                       type: Type.STRING,
-                      description: "Transcribed English text",
+                      description:
+                        "Verbatim transcribed English text from the attached audio",
                     },
                   },
                   required: ["id", "start", "end", "speaker", "text"],
@@ -150,7 +186,7 @@ Task:
               idioms: {
                 type: Type.ARRAY,
                 description:
-                  "Important idioms and multi-word expressions appearing in the episode transcript",
+                  "Important idioms and multi-word expressions appearing verbatim in the transcript",
                 items: {
                   type: Type.STRING,
                 },
@@ -228,6 +264,7 @@ Task:
       : [];
 
     const result: TranscriptData = {
+      audioUrl,
       segments: normalizedSegments,
       idioms,
       updatedAt: new Date().toISOString(),
