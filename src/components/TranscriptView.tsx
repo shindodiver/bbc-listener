@@ -15,6 +15,7 @@ import {
   CheckCircle2,
   BookOpen,
   User,
+  SlidersHorizontal,
 } from "lucide-react";
 import {
   Episode,
@@ -32,12 +33,15 @@ interface TranscriptViewProps {
   isTranscribing: boolean;
   transcribeError: string | null;
   currentTime: number;
+  syncOffset: number;
   autoScroll: boolean;
   vocabList: VocabEntry[];
   activeTerm: string | null;
   onOpenEpisodeModal: () => void;
   onGenerateTranscript: (forceRegenerate?: boolean) => void;
   onToggleAutoScroll: () => void;
+  onAdjustSyncOffset: (deltaSeconds: number) => void;
+  onResetSyncOffset: () => void;
   onSeekAndPlay: (seconds: number) => void;
   onSelectTerm: (
     term: string,
@@ -53,12 +57,15 @@ export default function TranscriptView({
   isTranscribing,
   transcribeError,
   currentTime,
+  syncOffset,
   autoScroll,
   vocabList,
   activeTerm,
   onOpenEpisodeModal,
   onGenerateTranscript,
   onToggleAutoScroll,
+  onAdjustSyncOffset,
+  onResetSyncOffset,
   onSeekAndPlay,
   onSelectTerm,
 }: TranscriptViewProps) {
@@ -66,22 +73,24 @@ export default function TranscriptView({
   const [showIdiomsList, setShowIdiomsList] = useState(true);
   const segmentRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
-  // 現在の再生位置に該当するセグメントを特定
+  // 現在の再生位置に該当するセグメントを特定（同期オフセット syncOffset を加減算して判定）
   const activeSegmentId = React.useMemo(() => {
     if (!transcript || transcript.segments.length === 0) return null;
     const segs = transcript.segments;
     for (let i = 0; i < segs.length; i++) {
       const seg = segs[i];
       const nextStart = i < segs.length - 1 ? segs[i + 1].start : seg.end + 5;
-      if (
-        currentTime >= seg.start &&
-        currentTime < Math.max(seg.end, nextStart)
-      ) {
+      const adjustedStart = Math.max(0, seg.start + syncOffset);
+      const adjustedEnd = Math.max(
+        adjustedStart + 0.5,
+        Math.max(seg.end, nextStart) + syncOffset
+      );
+      if (currentTime >= adjustedStart && currentTime < adjustedEnd) {
         return seg.id;
       }
     }
     return null;
-  }, [transcript, currentTime]);
+  }, [transcript, currentTime, syncOffset]);
 
   // 自動追従スクロール
   useEffect(() => {
@@ -325,36 +334,78 @@ export default function TranscriptView({
             </div>
           )}
 
-          {/* 文字起こしヘッダー（タップ操作ガイド＆小「再生成」ボタン） */}
-          <div className="flex flex-wrap items-center justify-between gap-2 px-1 text-[11px] text-slate-500">
+          {/* 文字起こしヘッダー（タップ操作ガイド・同期調整（-1s/+1s）・小「再生成」ボタン） */}
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-[11px] text-slate-600 shadow-2xs">
             <div className="flex flex-wrap items-center gap-2.5">
               <span className="inline-flex items-center gap-1">
                 <span className="inline-block border-b-2 border-dashed border-rose-500 font-semibold text-rose-700">
-                  破線下線
+                  破線
                 </span>
-                <span>= イディオム</span>
+                <span>= 熟語</span>
               </span>
               <span className="inline-flex items-center gap-1">
                 <span className="inline-block rounded bg-rose-100 px-1 font-semibold text-rose-800 underline decoration-rose-500 decoration-2">
-                  実線ハイライト
+                  実線
                 </span>
                 <span>= 記録済</span>
               </span>
             </div>
 
-            <button
-              type="button"
-              onClick={() => onGenerateTranscript(true)}
-              disabled={isTranscribing}
-              className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-600 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700 active:scale-95 disabled:opacity-50"
-            >
-              <RefreshCw
-                className={`h-3 w-3 text-rose-600 ${
-                  isTranscribing ? "animate-spin" : ""
-                }`}
-              />
-              <span>再生成</span>
-            </button>
+            <div className="flex items-center gap-1.5">
+              {/* 同期調整 (-1s / 現在オフセット / +1s) */}
+              <div
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-1.5 py-0.5"
+                role="group"
+                aria-label="同期調整"
+              >
+                <SlidersHorizontal className="h-3 w-3 text-slate-400" />
+                <span className="text-[10px] font-bold text-slate-500">
+                  同期調整
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onAdjustSyncOffset(-1)}
+                  className="rounded bg-white px-1.5 py-0.5 font-mono text-[10px] font-bold text-slate-700 shadow-2xs transition hover:bg-rose-50 hover:text-rose-700 active:scale-95"
+                  aria-label="同期を1秒早める (-1s)"
+                >
+                  -1s
+                </button>
+                <button
+                  type="button"
+                  onClick={onResetSyncOffset}
+                  className={`min-w-8 rounded px-1 py-0.5 text-center font-mono text-[10px] font-bold transition ${
+                    syncOffset !== 0
+                      ? "bg-rose-100 text-rose-700"
+                      : "text-slate-600"
+                  }`}
+                  title="タップでオフセットを0sにリセット"
+                >
+                  {syncOffset > 0 ? `+${syncOffset}s` : `${syncOffset}s`}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onAdjustSyncOffset(1)}
+                  className="rounded bg-white px-1.5 py-0.5 font-mono text-[10px] font-bold text-slate-700 shadow-2xs transition hover:bg-rose-50 hover:text-rose-700 active:scale-95"
+                  aria-label="同期を1秒遅らせる (+1s)"
+                >
+                  +1s
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => onGenerateTranscript(true)}
+                disabled={isTranscribing}
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-600 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700 active:scale-95 disabled:opacity-50"
+              >
+                <RefreshCw
+                  className={`h-3 w-3 text-rose-600 ${
+                    isTranscribing ? "animate-spin" : ""
+                  }`}
+                />
+                <span>再生成</span>
+              </button>
+            </div>
           </div>
 
           {/* セグメント一覧 */}

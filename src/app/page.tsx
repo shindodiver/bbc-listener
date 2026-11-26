@@ -59,6 +59,7 @@ export default function HomePage() {
   >(null);
   const [transcribeError, setTranscribeError] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
+  const [syncOffset, setSyncOffset] = useState<number>(0);
 
   // 音声再生関連
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -129,6 +130,7 @@ export default function HomePage() {
     setLastEpisodeId(selectedEpisode.id);
     setTranscribeError(null);
     setSheetOpen(false);
+    setSyncOffset(0);
 
     const cached = getCachedTranscript(
       selectedEpisode.id,
@@ -234,14 +236,22 @@ export default function HomePage() {
     (seconds: number) => {
       const audio = audioRef.current;
       if (!audio) return;
-      const clamped = Math.max(0, seconds);
+      const clamped = Math.max(0, seconds + syncOffset);
       audio.currentTime = clamped;
       setCurrentTime(clamped);
       audio.playbackRate = playbackSpeed;
       audio.play().catch(() => {});
     },
-    [playbackSpeed]
+    [playbackSpeed, syncOffset]
   );
+
+  const handleAdjustSyncOffset = useCallback((deltaSeconds: number) => {
+    setSyncOffset((prev) => prev + deltaSeconds);
+  }, []);
+
+  const handleResetSyncOffset = useCallback(() => {
+    setSyncOffset(0);
+  }, []);
 
   const handleSkip = useCallback((delta: number) => {
     const audio = audioRef.current;
@@ -542,7 +552,10 @@ export default function HomePage() {
           e.currentTarget.playbackRate = playbackSpeed;
 
           if (pendingSeekRef.current !== null) {
-            const seekTarget = pendingSeekRef.current;
+            const seekTarget = Math.max(
+              0,
+              pendingSeekRef.current + syncOffset
+            );
             pendingSeekRef.current = null;
             e.currentTarget.currentTime = seekTarget;
             setCurrentTime(seekTarget);
@@ -637,12 +650,15 @@ export default function HomePage() {
             isTranscribing={isCurrentEpisodeTranscribing}
             transcribeError={transcribeError}
             currentTime={currentTime}
+            syncOffset={syncOffset}
             autoScroll={autoScroll}
             vocabList={vocabList}
             activeTerm={sheetOpen ? selectedTerm : null}
             onOpenEpisodeModal={() => setIsEpisodeModalOpen(true)}
             onGenerateTranscript={handleGenerateTranscript}
             onToggleAutoScroll={handleToggleAutoScroll}
+            onAdjustSyncOffset={handleAdjustSyncOffset}
+            onResetSyncOffset={handleResetSyncOffset}
             onSeekAndPlay={handleSeekAndPlay}
             onSelectTerm={handleSelectTerm}
           />

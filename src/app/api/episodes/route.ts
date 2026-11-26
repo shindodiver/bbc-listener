@@ -1,3 +1,5 @@
+export const preferredRegion = "hnd1";
+
 import { NextResponse } from "next/server";
 import { Episode } from "@/types";
 
