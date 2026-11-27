@@ -25,14 +25,15 @@ export interface TranscriptData {
 }
 
 export interface WordDefinition {
-  term: string;       // 単語またはイディオム
-  isIdiom: boolean;   // イディオムかどうか
-  pos: string;        // 品詞/イディオム
-  phonetic: string;   // 発音記号
-  meaningJa: string;  // 日本語訳
-  usage: string;      // 使われ方・ニュアンス
-  exampleEn: string;  // 例文・英語
-  exampleJa: string;  // 例文・日本語
+  term: string;          // 単語またはイディオム（イディオム検出時はイディオム全体）
+  matchedText?: string;  // 本文中で該当する箇所の表記
+  isIdiom: boolean;      // イディオム・句動詞かどうか
+  pos: string;           // 品詞/イディオム
+  phonetic: string;      // 発音記号
+  meaningJa: string;     // 日本語訳
+  usage: string;         // 使われ方・ニュアンス
+  exampleEn: string;     // 例文・英語
+  exampleJa: string;     // 例文・日本語
 }
 
 export interface VocabEntry extends WordDefinition {
@@ -47,6 +48,8 @@ export interface VocabEntry extends WordDefinition {
 }
 
 export type PlaybackSpeed = 0.8 | 1.0 | 1.2 | 1.5;
+
+export type PlaybackMode = "normal" | "loop" | "continuous";
 
 export type MainTab = "listening" | "vocab";
 

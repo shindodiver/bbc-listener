@@ -66,7 +66,7 @@ function formatDuration(rawDuration: string): string | undefined {
  * 各 <item> ブロックの内部だけで title, guid, pubDate, description, enclosure url を抽出する。
  * これにより <channel> 直下の <title> や <description> とインデックスが絶対にズレない。
  */
-function parseBbcRss(xml: string, limit = 20): Episode[] {
+function parseBbcRss(xml: string, limit = 50): Episode[] {
   const rawBlocks = xml.split(/<item(?:\s[^>]*)?>/i).slice(1);
   const episodes: Episode[] = [];
 
@@ -120,7 +120,7 @@ export async function GET() {
     }
 
     const xml = await response.text();
-    const episodes = parseBbcRss(xml, 20);
+    const episodes = parseBbcRss(xml, 50);
 
     if (episodes.length === 0) {
       throw new Error("RSSフィードからエピソードを解析できませんでした。");

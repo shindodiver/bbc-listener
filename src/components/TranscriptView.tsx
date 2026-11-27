@@ -16,6 +16,7 @@ import {
   BookOpen,
   User,
   SlidersHorizontal,
+  Crosshair,
 } from "lucide-react";
 import {
   Episode,
@@ -42,6 +43,7 @@ interface TranscriptViewProps {
   onToggleAutoScroll: () => void;
   onAdjustSyncOffset: (deltaSeconds: number) => void;
   onResetSyncOffset: () => void;
+  onSyncToSegment: (segmentStartSeconds: number) => void;
   onSeekAndPlay: (seconds: number) => void;
   onSelectTerm: (
     term: string,
@@ -66,6 +68,7 @@ export default function TranscriptView({
   onToggleAutoScroll,
   onAdjustSyncOffset,
   onResetSyncOffset,
+  onSyncToSegment,
   onSeekAndPlay,
   onSelectTerm,
 }: TranscriptViewProps) {
@@ -73,7 +76,7 @@ export default function TranscriptView({
   const [showIdiomsList, setShowIdiomsList] = useState(true);
   const segmentRefs = useRef<Map<string, HTMLDivElement>>(new Map());
 
-  // 現在の再生位置に該当するセグメントを特定（同期オフセット syncOffset を加減算して判定）
+  // 現在の再生位置に該当するセグメントを特定（同期オフセット syncOffset を加減算して厳密判定）
   const activeSegmentId = React.useMemo(() => {
     if (!transcript || transcript.segments.length === 0) return null;
     const segs = transcript.segments;
@@ -81,11 +84,19 @@ export default function TranscriptView({
       const seg = segs[i];
       const nextStart = i < segs.length - 1 ? segs[i + 1].start : seg.end + 5;
       const adjustedStart = Math.max(0, seg.start + syncOffset);
+      // 次のセグメントの開始時刻を超えないよう境界を厳密化
+      const boundaryEnd =
+        i < segs.length - 1 ? Math.min(seg.end, nextStart) : seg.end + 3;
       const adjustedEnd = Math.max(
-        adjustedStart + 0.5,
-        Math.max(seg.end, nextStart) + syncOffset
+        adjustedStart + 0.3,
+        boundaryEnd + syncOffset
       );
-      if (currentTime >= adjustedStart && currentTime < adjustedEnd) {
+      const nextAdjustedStart = Math.max(
+        adjustedEnd,
+        nextStart + syncOffset
+      );
+
+      if (currentTime >= adjustedStart && currentTime < nextAdjustedStart) {
         return seg.id;
       }
     }
@@ -114,7 +125,6 @@ export default function TranscriptView({
     );
   }
 
-  // イディオムチップをタップしたときに該当セグメントを探して解説を開く
   const handleTapIdiomChip = (idiom: string) => {
     if (!transcript) return;
     const lower = idiom.toLowerCase();
@@ -126,6 +136,11 @@ export default function TranscriptView({
       onSelectTerm(idiom, true, matchedSeg);
     }
   };
+
+  const formattedOffset =
+    syncOffset > 0
+      ? `+${Number.isInteger(syncOffset) ? syncOffset : syncOffset.toFixed(1)}s`
+      : `${Number.isInteger(syncOffset) ? syncOffset : syncOffset.toFixed(1)}s`;
 
   return (
     <div className="flex flex-col gap-3 px-3 pt-3 pb-8">
@@ -247,7 +262,7 @@ export default function TranscriptView({
           <p className="mx-auto mt-1.5 max-w-xs text-xs leading-relaxed text-slate-500">
             {isTranscribing
               ? "BBCのオリジナルMP3音声を取得し、Gemini APIで解析しています。完了まで20〜45秒ほどお待ちください。"
-              : "音声からタイムスタンプ付き英文スクリプトと重要イディオムを自動抽出します。一度生成すると端末に保存され、次回から即座に表示されます。"}
+              : "音声からタイムスタンプ付き英文スクリプトと重要イディオム・句動詞を自動抽出します。一度生成すると端末に保存され、次回から即座に表示されます。"}
           </p>
 
           {transcribeError && (
@@ -295,7 +310,8 @@ export default function TranscriptView({
                 <div className="flex items-center gap-1.5">
                   <BookOpen className="h-4 w-4 text-rose-600" />
                   <span className="text-xs font-bold text-slate-800">
-                    このエピソードの重要イディオム ({transcript.idioms.length})
+                    このエピソードの重要イディオム・句動詞 (
+                    {transcript.idioms.length})
                   </span>
                 </div>
                 {showIdiomsList ? (
@@ -311,7 +327,8 @@ export default function TranscriptView({
                     const isSaved = vocabList.some(
                       (v) =>
                         v.term.toLowerCase() === idiom.toLowerCase() ||
-                        v.surfaceTerm?.toLowerCase() === idiom.toLowerCase()
+                        v.surfaceTerm?.toLowerCase() === idiom.toLowerCase() ||
+                        v.matchedText?.toLowerCase() === idiom.toLowerCase()
                     );
                     return (
                       <button
@@ -334,77 +351,88 @@ export default function TranscriptView({
             </div>
           )}
 
-          {/* 文字起こしヘッダー（タップ操作ガイド・同期調整（-1s/+1s）・小「再生成」ボタン） */}
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-[11px] text-slate-600 shadow-2xs">
-            <div className="flex flex-wrap items-center gap-2.5">
-              <span className="inline-flex items-center gap-1">
-                <span className="inline-block border-b-2 border-dashed border-rose-500 font-semibold text-rose-700">
-                  破線
+          {/* 同期調整バー (-5s / -1s / 現在オフセット / +1s / +5s) ＆凡例 */}
+          <div className="flex flex-col gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[11px] text-slate-600 shadow-2xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5">
+                <SlidersHorizontal className="h-3.5 w-3.5 text-rose-600" />
+                <span className="font-bold text-slate-700">同期調整</span>
+                <span className="text-[10px] text-slate-400">
+                  （エピソード別に自動保存）
                 </span>
-                <span>= 熟語</span>
-              </span>
-              <span className="inline-flex items-center gap-1">
-                <span className="inline-block rounded bg-rose-100 px-1 font-semibold text-rose-800 underline decoration-rose-500 decoration-2">
-                  実線
-                </span>
-                <span>= 記録済</span>
-              </span>
-            </div>
+              </div>
 
-            <div className="flex items-center gap-1.5">
-              {/* 同期調整 (-1s / 現在オフセット / +1s) */}
               <div
-                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-1.5 py-0.5"
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 p-0.5"
                 role="group"
-                aria-label="同期調整"
+                aria-label="同期オフセット調整"
               >
-                <SlidersHorizontal className="h-3 w-3 text-slate-400" />
-                <span className="text-[10px] font-bold text-slate-500">
-                  同期調整
-                </span>
+                <button
+                  type="button"
+                  onClick={() => onAdjustSyncOffset(-5)}
+                  className="rounded bg-white px-1.5 py-0.5 font-mono text-[10px] font-bold text-slate-700 shadow-2xs transition hover:bg-rose-50 hover:text-rose-700 active:scale-95"
+                  aria-label="5秒早める (-5s)"
+                >
+                  -5s
+                </button>
                 <button
                   type="button"
                   onClick={() => onAdjustSyncOffset(-1)}
                   className="rounded bg-white px-1.5 py-0.5 font-mono text-[10px] font-bold text-slate-700 shadow-2xs transition hover:bg-rose-50 hover:text-rose-700 active:scale-95"
-                  aria-label="同期を1秒早める (-1s)"
+                  aria-label="1秒早める (-1s)"
                 >
                   -1s
                 </button>
                 <button
                   type="button"
                   onClick={onResetSyncOffset}
-                  className={`min-w-8 rounded px-1 py-0.5 text-center font-mono text-[10px] font-bold transition ${
+                  className={`min-w-10 rounded px-1.5 py-0.5 text-center font-mono text-[10px] font-bold transition ${
                     syncOffset !== 0
-                      ? "bg-rose-100 text-rose-700"
-                      : "text-slate-600"
+                      ? "bg-rose-600 text-white"
+                      : "text-slate-600 hover:bg-slate-200"
                   }`}
-                  title="タップでオフセットを0sにリセット"
+                  title="タップで0sにリセット"
                 >
-                  {syncOffset > 0 ? `+${syncOffset}s` : `${syncOffset}s`}
+                  {formattedOffset}
                 </button>
                 <button
                   type="button"
                   onClick={() => onAdjustSyncOffset(1)}
                   className="rounded bg-white px-1.5 py-0.5 font-mono text-[10px] font-bold text-slate-700 shadow-2xs transition hover:bg-rose-50 hover:text-rose-700 active:scale-95"
-                  aria-label="同期を1秒遅らせる (+1s)"
+                  aria-label="1秒遅らせる (+1s)"
                 >
                   +1s
                 </button>
+                <button
+                  type="button"
+                  onClick={() => onAdjustSyncOffset(5)}
+                  className="rounded bg-white px-1.5 py-0.5 font-mono text-[10px] font-bold text-slate-700 shadow-2xs transition hover:bg-rose-50 hover:text-rose-700 active:scale-95"
+                  aria-label="5秒遅らせる (+5s)"
+                >
+                  +5s
+                </button>
               </div>
+            </div>
 
-              <button
-                type="button"
-                onClick={() => onGenerateTranscript(true)}
-                disabled={isTranscribing}
-                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-600 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700 active:scale-95 disabled:opacity-50"
-              >
-                <RefreshCw
-                  className={`h-3 w-3 text-rose-600 ${
-                    isTranscribing ? "animate-spin" : ""
-                  }`}
-                />
-                <span>再生成</span>
-              </button>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-1.5 text-[10px] text-slate-500">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <span className="inline-flex items-center gap-1">
+                  <span className="inline-block border-b-2 border-dashed border-rose-500 font-semibold text-rose-700">
+                    破線
+                  </span>
+                  <span>= 熟語</span>
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <span className="inline-block rounded bg-rose-100 px-1 font-semibold text-rose-800 underline decoration-rose-500 decoration-2">
+                    実線
+                  </span>
+                  <span>= 記録済</span>
+                </span>
+                <span className="inline-flex items-center gap-1">
+                  <Crosshair className="h-3 w-3 text-rose-600" />
+                  <span>「ここに同期」で現在音声に即合わせ</span>
+                </span>
+              </div>
             </div>
           </div>
 
@@ -434,7 +462,7 @@ export default function TranscriptView({
                       : "border-slate-200 bg-white hover:border-slate-300"
                   }`}
                 >
-                  {/* セグメントヘッダー：タイムスタンプシークボタン＆話者名 */}
+                  {/* セグメントヘッダー：タイムスタンプシークボタン・話者名・「ここに同期」ボタン */}
                   <div className="mb-2 flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <button
@@ -460,11 +488,23 @@ export default function TranscriptView({
                       )}
                     </div>
 
-                    {isActive && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-bold text-rose-700">
-                        再生中
-                      </span>
-                    )}
+                    <div className="flex items-center gap-1.5">
+                      {isActive && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-bold text-rose-700">
+                          再生中
+                        </span>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => onSyncToSegment(seg.start)}
+                        className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-bold text-slate-600 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700 active:scale-95"
+                        title="現在の音声再生位置をこのセグメントの開始位置に同期する"
+                      >
+                        <Crosshair className="h-3 w-3 text-rose-600" />
+                        <span>ここに同期</span>
+                      </button>
+                    </div>
                   </div>
 
                   {/* セグメント本文（イディオム・単語タップ可能） */}

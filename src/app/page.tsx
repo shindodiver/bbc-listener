@@ -11,6 +11,7 @@ import {
 import {
   Episode,
   MainTab,
+  PlaybackMode,
   PlaybackSpeed,
   TranscriptData,
   TranscriptSegment,
@@ -22,14 +23,18 @@ import {
   getCachedDefinition,
   getCachedEpisodeIdSet,
   getCachedTranscript,
+  getEpisodeSyncOffset,
   getLastEpisodeId,
+  getPlaybackModePref,
   getVocabList,
   removeCachedTranscript,
   saveVocabList,
   setAutoScrollPref,
   setCachedDefinition,
   setCachedTranscript,
+  setEpisodeSyncOffset,
   setLastEpisodeId,
+  setPlaybackModePref,
 } from "@/lib/storage";
 import AudioPlayerBar from "@/components/AudioPlayerBar";
 import EpisodeSelectorModal from "@/components/EpisodeSelectorModal";
@@ -64,11 +69,14 @@ export default function HomePage() {
   // 音声再生関連
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const pendingSeekRef = useRef<number | null>(null);
+  const autoPlayNextRef = useRef<boolean>(false);
+  const autoTranscribeNextRef = useRef<boolean>(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoadingAudio, setIsLoadingAudio] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(360);
   const [playbackSpeed, setPlaybackSpeed] = useState<PlaybackSpeed>(1.0);
+  const [playbackMode, setPlaybackMode] = useState<PlaybackMode>("normal");
 
   // 単語解説ボトムシート関連
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -98,12 +106,15 @@ export default function HomePage() {
       setEpisodes(list);
       setCachedEpisodeIds(getCachedEpisodeIdSet(list));
 
-      const savedEpisodeId = getLastEpisodeId();
-      const initialEp =
-        list.find((e) => e.id === savedEpisodeId) || list[0] || null;
-      if (initialEp) {
-        selectedEpisodeRef.current = initialEp;
-        setSelectedEpisode(initialEp);
+      const currentEp = selectedEpisodeRef.current;
+      if (!currentEp) {
+        const savedEpisodeId = getLastEpisodeId();
+        const initialEp =
+          list.find((e) => e.id === savedEpisodeId) || list[0] || null;
+        if (initialEp) {
+          selectedEpisodeRef.current = initialEp;
+          setSelectedEpisode(initialEp);
+        }
       }
     } catch (e) {
       setEpisodesError(
@@ -119,10 +130,111 @@ export default function HomePage() {
   useEffect(() => {
     setVocabList(getVocabList());
     setAutoScroll(getAutoScrollPref());
+    setPlaybackMode(getPlaybackModePref());
     fetchEpisodes();
   }, [fetchEpisodes]);
 
-  // エピソード切替時：selectedEpisodeRef を同期し、id + audioUrl に一致するキャッシュのみ読み込む
+  // 再生中は100ms間隔でcurrentTimeを同期し、iOS Safariのtimeupdate遅延によるハイライト遅れを防ぐ
+  useEffect(() => {
+    if (!isPlaying) return;
+    const timer = window.setInterval(() => {
+      const audio = audioRef.current;
+      if (audio && !audio.paused) {
+        setCurrentTime(audio.currentTime);
+      }
+    }, 100);
+    return () => window.clearInterval(timer);
+  }, [isPlaying]);
+
+  // AI文字起こし実行（リクエスト開始時のエピソードID・音声URLと現在選択中のエピソードを厳密に照合）
+  const runTranscribeForEpisode = useCallback(
+    async (targetEp: Episode, forceRegenerate = false) => {
+      const reqEpisodeId = targetEp.id;
+      const reqAudioUrl = targetEp.audioUrl;
+      const reqTitle = targetEp.title;
+
+      if (forceRegenerate) {
+        removeCachedTranscript(reqEpisodeId, reqAudioUrl);
+        if (selectedEpisodeRef.current?.id === reqEpisodeId) {
+          setTranscript(null);
+        }
+        setCachedEpisodeIds(getCachedEpisodeIdSet(episodes));
+      } else {
+        const cached = getCachedTranscript(reqEpisodeId, reqAudioUrl);
+        if (cached) {
+          if (selectedEpisodeRef.current?.id === reqEpisodeId) {
+            setTranscript(cached);
+          }
+          return;
+        }
+      }
+
+      setTranscribingEpisodeId(reqEpisodeId);
+      setTranscribeError(null);
+
+      try {
+        const res = await fetch("/api/transcribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            audioUrl: reqAudioUrl,
+            episodeTitle: reqTitle,
+          }),
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(
+            data.error || "文字起こしの生成中にエラーが発生しました。"
+          );
+        }
+
+        const transcriptData: TranscriptData = {
+          episodeId: reqEpisodeId,
+          audioUrl: reqAudioUrl,
+          segments: data.segments || [],
+          idioms: data.idioms || [],
+          updatedAt: new Date().toISOString(),
+        };
+
+        setCachedTranscript(reqEpisodeId, reqAudioUrl, transcriptData);
+        setCachedEpisodeIds(getCachedEpisodeIdSet(episodes));
+
+        const currentEp = selectedEpisodeRef.current;
+        if (
+          currentEp &&
+          currentEp.id === reqEpisodeId &&
+          currentEp.audioUrl === reqAudioUrl
+        ) {
+          setTranscript(transcriptData);
+        }
+      } catch (e) {
+        const currentEp = selectedEpisodeRef.current;
+        if (currentEp && currentEp.id === reqEpisodeId) {
+          setTranscribeError(
+            e instanceof Error
+              ? e.message
+              : "文字起こし処理に失敗しました。"
+          );
+        }
+      } finally {
+        setTranscribingEpisodeId((prev) =>
+          prev === reqEpisodeId ? null : prev
+        );
+      }
+    },
+    [episodes]
+  );
+
+  const handleGenerateTranscript = useCallback(
+    async (forceRegenerate = false) => {
+      if (!selectedEpisode) return;
+      await runTranscribeForEpisode(selectedEpisode, forceRegenerate);
+    },
+    [selectedEpisode, runTranscribeForEpisode]
+  );
+
+  // エピソード切替時：selectedEpisodeRef を同期し、id + audioUrl に一致するキャッシュとエピソード別syncOffsetを読み込む
   useEffect(() => {
     selectedEpisodeRef.current = selectedEpisode;
     if (!selectedEpisode) return;
@@ -130,13 +242,21 @@ export default function HomePage() {
     setLastEpisodeId(selectedEpisode.id);
     setTranscribeError(null);
     setSheetOpen(false);
-    setSyncOffset(0);
+    setSyncOffset(getEpisodeSyncOffset(selectedEpisode.id));
 
     const cached = getCachedTranscript(
       selectedEpisode.id,
       selectedEpisode.audioUrl
     );
     setTranscript(cached);
+
+    // 連続再生モードで次のエピソードへ自動進行した際、未文字起こしなら自動で文字起こしを開始
+    if (autoTranscribeNextRef.current) {
+      autoTranscribeNextRef.current = false;
+      if (!cached) {
+        runTranscribeForEpisode(selectedEpisode, false);
+      }
+    }
 
     // 音声要素のソース更新
     const audio = audioRef.current;
@@ -149,12 +269,28 @@ export default function HomePage() {
         audio.load();
         setCurrentTime(0);
         setDuration(360);
-        setIsPlaying(false);
+
+        if (autoPlayNextRef.current) {
+          autoPlayNextRef.current = false;
+          setIsLoadingAudio(true);
+          audio
+            .play()
+            .then(() => {
+              setIsPlaying(true);
+              setIsLoadingAudio(false);
+            })
+            .catch(() => {
+              setIsPlaying(false);
+              setIsLoadingAudio(false);
+            });
+        } else {
+          setIsPlaying(false);
+        }
       }
     }
   }, [selectedEpisode]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Media Session API 対応（iPhoneロック画面・コントロールセンターでの操作）
+  // Media Session API 対応
   useEffect(() => {
     if (typeof window === "undefined" || !("mediaSession" in navigator)) return;
     if (!selectedEpisode) return;
@@ -245,13 +381,40 @@ export default function HomePage() {
     [playbackSpeed, syncOffset]
   );
 
-  const handleAdjustSyncOffset = useCallback((deltaSeconds: number) => {
-    setSyncOffset((prev) => prev + deltaSeconds);
-  }, []);
+  // エピソード別同期オフセット調整 (-5s / -1s / +1s / +5s)
+  const handleAdjustSyncOffset = useCallback(
+    (deltaSeconds: number) => {
+      setSyncOffset((prev) => {
+        const next = Math.round((prev + deltaSeconds) * 10) / 10;
+        if (selectedEpisode) {
+          setEpisodeSyncOffset(selectedEpisode.id, next);
+        }
+        return next;
+      });
+    },
+    [selectedEpisode]
+  );
 
   const handleResetSyncOffset = useCallback(() => {
     setSyncOffset(0);
-  }, []);
+    if (selectedEpisode) {
+      setEpisodeSyncOffset(selectedEpisode.id, 0);
+    }
+  }, [selectedEpisode]);
+
+  // 「ここに同期」ボタン：現在の音声再生時刻 - そのセグメントの start を syncOffset に即反映
+  const handleSyncToSegment = useCallback(
+    (segmentStartSeconds: number) => {
+      const audio = audioRef.current;
+      const actualTime = audio ? audio.currentTime : currentTime;
+      const newOffset = Math.round((actualTime - segmentStartSeconds) * 10) / 10;
+      setSyncOffset(newOffset);
+      if (selectedEpisode) {
+        setEpisodeSyncOffset(selectedEpisode.id, newOffset);
+      }
+    },
+    [currentTime, selectedEpisode]
+  );
 
   const handleSkip = useCallback((delta: number) => {
     const audio = audioRef.current;
@@ -270,85 +433,57 @@ export default function HomePage() {
     }
   }, []);
 
-  // AI文字起こし実行（リクエスト開始時のエピソードID・音声URLと現在選択中のエピソードを厳密に照合）
-  const handleGenerateTranscript = useCallback(
-    async (forceRegenerate = false) => {
-      if (!selectedEpisode) return;
+  // 再生モード切替（通常 -> ループ -> 連続）
+  const handleCyclePlaybackMode = useCallback(() => {
+    setPlaybackMode((prev) => {
+      const next: PlaybackMode =
+        prev === "normal"
+          ? "loop"
+          : prev === "loop"
+          ? "continuous"
+          : "normal";
+      setPlaybackModePref(next);
+      return next;
+    });
+  }, []);
 
-      const reqEpisodeId = selectedEpisode.id;
-      const reqAudioUrl = selectedEpisode.audioUrl;
-      const reqTitle = selectedEpisode.title;
+  // エピソード再生終了時の処理（通常／ループ／連続再生）
+  const handleAudioEnded = useCallback(() => {
+    const audio = audioRef.current;
+    if (playbackMode === "loop" && audio) {
+      audio.currentTime = 0;
+      setCurrentTime(0);
+      audio.playbackRate = playbackSpeed;
+      audio.play().catch(() => {
+        setIsPlaying(false);
+      });
+      return;
+    }
 
-      if (forceRegenerate) {
-        removeCachedTranscript(reqEpisodeId, reqAudioUrl);
-        setTranscript(null);
-        setCachedEpisodeIds(getCachedEpisodeIdSet(episodes));
-      } else {
-        const cached = getCachedTranscript(reqEpisodeId, reqAudioUrl);
-        if (cached) {
-          setTranscript(cached);
-          return;
-        }
+    if (
+      playbackMode === "continuous" &&
+      selectedEpisode &&
+      episodes.length > 0
+    ) {
+      const currentIndex = episodes.findIndex(
+        (ep) => ep.id === selectedEpisode.id
+      );
+      const nextIndex =
+        currentIndex >= 0 && currentIndex + 1 < episodes.length
+          ? currentIndex + 1
+          : 0;
+      const nextEp = episodes[nextIndex];
+      if (nextEp && nextEp.id !== selectedEpisode.id) {
+        autoPlayNextRef.current = true;
+        autoTranscribeNextRef.current = true;
+        selectedEpisodeRef.current = nextEp;
+        setSelectedEpisode(nextEp);
+        return;
       }
+    }
 
-      setTranscribingEpisodeId(reqEpisodeId);
-      setTranscribeError(null);
-
-      try {
-        const res = await fetch("/api/transcribe", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            audioUrl: reqAudioUrl,
-            episodeTitle: reqTitle,
-          }),
-        });
-
-        const data = await res.json();
-        if (!res.ok) {
-          throw new Error(
-            data.error || "文字起こしの生成中にエラーが発生しました。"
-          );
-        }
-
-        const transcriptData: TranscriptData = {
-          episodeId: reqEpisodeId,
-          audioUrl: reqAudioUrl,
-          segments: data.segments || [],
-          idioms: data.idioms || [],
-          updatedAt: new Date().toISOString(),
-        };
-
-        // リクエスト対象エピソードのキャッシュとして保存
-        setCachedTranscript(reqEpisodeId, reqAudioUrl, transcriptData);
-        setCachedEpisodeIds(getCachedEpisodeIdSet(episodes));
-
-        // リクエスト開始時のID・audioUrlと現在選択中のID・audioUrlが一致する場合のみ画面を更新
-        const currentEp = selectedEpisodeRef.current;
-        if (
-          currentEp &&
-          currentEp.id === reqEpisodeId &&
-          currentEp.audioUrl === reqAudioUrl
-        ) {
-          setTranscript(transcriptData);
-        }
-      } catch (e) {
-        const currentEp = selectedEpisodeRef.current;
-        if (currentEp && currentEp.id === reqEpisodeId) {
-          setTranscribeError(
-            e instanceof Error
-              ? e.message
-              : "文字起こし処理に失敗しました。"
-          );
-        }
-      } finally {
-        setTranscribingEpisodeId((prev) =>
-          prev === reqEpisodeId ? null : prev
-        );
-      }
-    },
-    [selectedEpisode, episodes]
-  );
+    setIsPlaying(false);
+  }, [playbackMode, playbackSpeed, selectedEpisode, episodes]);
 
   // 自動追従スクロール切替
   const handleToggleAutoScroll = useCallback(() => {
@@ -359,12 +494,11 @@ export default function HomePage() {
     });
   }, []);
 
-  // 単語・イディオムをタップして解説を取得
+  // 単語・イディオムをタップして解説を取得（単一語からイディオムが検出された場合はイディオム一覧にも自動追加）
   const fetchWordDefinition = useCallback(
     async (term: string, isIdiom: boolean, segment: TranscriptSegment) => {
       if (!selectedEpisode) return;
 
-      // 前後のセグメントも含めた文脈文字列を作る
       let contextWindow = segment.text;
       if (transcript) {
         const idx = transcript.segments.findIndex((s) => s.id === segment.id);
@@ -380,7 +514,6 @@ export default function HomePage() {
         }
       }
 
-      // キャッシュ確認
       const cached = getCachedDefinition(term, segment.text);
       if (cached) {
         setDefinition(cached);
@@ -413,6 +546,28 @@ export default function HomePage() {
         const def: WordDefinition = data;
         setCachedDefinition(term, segment.text, def);
         setDefinition(def);
+
+        // 単一単語タップからイディオムが自動検出された場合、現在の文字起こしのイディオム配列にも追加して破線下線化
+        if (def.isIdiom && transcript && selectedEpisodeRef.current) {
+          const candidatePhrase = (def.matchedText || def.term).trim();
+          if (
+            candidatePhrase.includes(" ") &&
+            !transcript.idioms.some(
+              (id) => id.toLowerCase() === candidatePhrase.toLowerCase()
+            )
+          ) {
+            const updatedTranscript: TranscriptData = {
+              ...transcript,
+              idioms: [...transcript.idioms, candidatePhrase],
+            };
+            setTranscript(updatedTranscript);
+            setCachedTranscript(
+              selectedEpisodeRef.current.id,
+              selectedEpisodeRef.current.audioUrl,
+              updatedTranscript
+            );
+          }
+        }
       } catch (e) {
         setDefineError(
           e instanceof Error
@@ -441,15 +596,20 @@ export default function HomePage() {
   const currentSavedEntry = React.useMemo(() => {
     const targetTerm = definition?.term || selectedTerm;
     if (!targetTerm) return undefined;
+    const defLower = targetTerm.toLowerCase();
+    const selLower = selectedTerm.toLowerCase();
+    const matchedLower = definition?.matchedText?.toLowerCase();
+
     return vocabList.find((item) => {
       const t = item.term.toLowerCase();
       const s = item.surfaceTerm?.toLowerCase();
-      const defLower = targetTerm.toLowerCase();
-      const selLower = selectedTerm.toLowerCase();
+      const m = item.matchedText?.toLowerCase();
       return (
         t === defLower ||
         t === selLower ||
-        (s && (s === defLower || s === selLower))
+        (matchedLower && t === matchedLower) ||
+        (s && (s === defLower || s === selLower || s === matchedLower)) ||
+        (m && (m === defLower || m === selLower || m === matchedLower))
       );
     });
   }, [vocabList, definition, selectedTerm]);
@@ -466,7 +626,7 @@ export default function HomePage() {
       const newEntry: VocabEntry = {
         ...definition,
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        surfaceTerm: selectedTerm,
+        surfaceTerm: definition.matchedText || selectedTerm,
         episodeId: selectedEpisode.id,
         episodeTitle: selectedEpisode.title,
         timestamp: selectedSegment.start,
@@ -552,9 +712,12 @@ export default function HomePage() {
           e.currentTarget.playbackRate = playbackSpeed;
 
           if (pendingSeekRef.current !== null) {
+            const epOffset = selectedEpisodeRef.current
+              ? getEpisodeSyncOffset(selectedEpisodeRef.current.id)
+              : syncOffset;
             const seekTarget = Math.max(
               0,
-              pendingSeekRef.current + syncOffset
+              pendingSeekRef.current + epOffset
             );
             pendingSeekRef.current = null;
             e.currentTarget.currentTime = seekTarget;
@@ -582,9 +745,7 @@ export default function HomePage() {
         onWaiting={() => {
           setIsLoadingAudio(true);
         }}
-        onEnded={() => {
-          setIsPlaying(false);
-        }}
+        onEnded={handleAudioEnded}
         onError={() => {
           setIsLoadingAudio(false);
           setIsPlaying(false);
@@ -659,6 +820,7 @@ export default function HomePage() {
             onToggleAutoScroll={handleToggleAutoScroll}
             onAdjustSyncOffset={handleAdjustSyncOffset}
             onResetSyncOffset={handleResetSyncOffset}
+            onSyncToSegment={handleSyncToSegment}
             onSeekAndPlay={handleSeekAndPlay}
             onSelectTerm={handleSelectTerm}
           />
@@ -682,10 +844,12 @@ export default function HomePage() {
           currentTime={currentTime}
           duration={duration}
           playbackSpeed={playbackSpeed}
+          playbackMode={playbackMode}
           onTogglePlay={handleTogglePlay}
           onSeek={handleSeek}
           onSkip={handleSkip}
           onChangeSpeed={handleChangeSpeed}
+          onCyclePlaybackMode={handleCyclePlaybackMode}
         />
 
         {/* 下部タブバー（リスニング／単語ノート） */}

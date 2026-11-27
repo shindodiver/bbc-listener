@@ -87,7 +87,6 @@ export async function POST(req: NextRequest) {
       audioRes.headers.get("content-type") || ""
     ).toLowerCase();
 
-    // Content-Type が audio/ を含むか検証（HTMLエラーページ等でないか確認）
     if (!rawContentType.includes("audio/")) {
       return NextResponse.json(
         {
@@ -101,7 +100,6 @@ export async function POST(req: NextRequest) {
 
     const arrayBuffer = await audioRes.arrayBuffer();
 
-    // サイズが 50KB 以上あるか検証
     if (arrayBuffer.byteLength < MIN_AUDIO_BYTES) {
       return NextResponse.json(
         {
@@ -118,22 +116,22 @@ export async function POST(req: NextRequest) {
 
     const ai = new GoogleGenAI({ apiKey });
 
-    const prompt = `あなたはBBC Learning English「6 Minute English」の音声文字起こし専門アシスタントです。
+    const prompt = `あなたはBBC Learning English「6 Minute English」の音声文字起こし＆英語表現抽出の専門アシスタントです。
 
 【最重要ルール】
 1. 添付された音声データの内容だけを忠実に文字起こしすること。内容が聞き取れない場合でも別のエピソードを推測・創作しないこと。
 2. 冒頭や途中にポッドキャストの広告・スポンサー紹介・他番組のプロモーションが含まれる場合は文字起こしから除外すること。
-3. 「6 Minute English」の本編開始位置（例: "Hello, welcome to 6 Minute English..." や番組イントロの開始時点）を 0 秒基準として、全セグメントの start / end タイムスタンプを算出すること（冒頭に広告があった場合はその広告秒数を差し引いて本編開始を 0 秒とすること）。
+3. 「6 Minute English」の本編開始位置（例: "Hello, welcome to 6 Minute English..." や番組イントロの開始時点）を 0 秒基準として、全セグメントの start / end タイムスタンプを算出すること。
 
-出力仕様:
-- 本編の最初から最後まで、1〜2文ごと（目安として4〜15秒程度）の自然なセグメントに分割する。
-- 各セグメント ("segments") には以下を含める:
-  - "id": "seg-1", "seg-2", ... の連番
-  - "start": 本編開始位置を 0 秒基準とした開始秒数（数値、例: 0, 4.2, 12.8）
-  - "end": 本編開始位置を 0 秒基準とした終了秒数（数値、例: 4.2, 12.8, 20.5）
-  - "speaker": 音声内で実際に発話している話者名（例: "Phil", "Georgie", "Neil", "Beth", "Rob", "Pippa", "Guest" など、音声内で名乗っている実際の名前）
-  - "text": 実際に発話された英語スクリプト全文
-- "idioms": この音声の本編スクリプト内に実際に登場する重要な英語イディオム・熟語・句動詞・定型表現（6〜15個）の配列。本文中の表記と一致する文字列で抽出すること。`;
+【セグメント分割とタイムスタンプ精度ルール】
+- 再生中のハイライト追従の遅れやズレを防ぐため、1セグメントは必ず短く（1〜2文・5〜10秒目安、短い相槌や挨拶は1〜4秒）こまめに区切ること。複数の長い段落を1つのセグメントにまとめないこと。
+- 各セグメントの "start" と "end" は、そのセリフが実際に発話開始された瞬間と発話終了した瞬間の秒数（小数第1位まで、例: 0.0, 4.2, 9.8）に厳密に一致させること。ジングルや無音の間（ポーズ）はセリフの区切りとして扱い、次のセリフの実際の話し始めを次の "start" にすること。
+
+【イディオム・句動詞・コロケーション抽出ルール ("idioms")】
+- エピソード全体から、句動詞（phrasal verbs: 例 "come up with", "find out", "rely on", "turn out", "look into", "give up" 等）・熟語・慣用表現（idioms）・重要コロケーションを漏れなく抽出すること（目安として12〜25個）。
+- 必ず「文字起こし本文（segments[].text）の中に実際に出現する表記そのまま（動詞の活用形・時制・所有格・代名詞を辞書の見出し形に変換しない）」の文字列で "idioms" 配列に入れること。
+  - 良い例: 本文が "She came up with a great idea" なら "came up with"、本文が "taking it for granted" なら "taking it for granted"
+  - 悪い例: 本文にない原形 "come up with" や "take something for granted" に書き換えること`;
 
     const generateForModel = (model: string) =>
       ai.models.generateContent({
@@ -163,7 +161,7 @@ export async function POST(req: NextRequest) {
               segments: {
                 type: Type.ARRAY,
                 description:
-                  "Time-aligned verbatim transcript segments of the 6 Minute English main programme (excluding ads, with main programme start as 0s)",
+                  "Short (1-2 sentences, 5-10s) time-aligned verbatim transcript segments of the 6 Minute English main programme",
                 items: {
                   type: Type.OBJECT,
                   properties: {
@@ -174,12 +172,12 @@ export async function POST(req: NextRequest) {
                     start: {
                       type: Type.NUMBER,
                       description:
-                        "Start time in seconds relative to main programme start (0s)",
+                        "Exact utterance start time in seconds relative to main programme start (0s)",
                     },
                     end: {
                       type: Type.NUMBER,
                       description:
-                        "End time in seconds relative to main programme start (0s)",
+                        "Exact utterance end time in seconds relative to main programme start (0s)",
                     },
                     speaker: {
                       type: Type.STRING,
@@ -188,7 +186,7 @@ export async function POST(req: NextRequest) {
                     text: {
                       type: Type.STRING,
                       description:
-                        "Verbatim transcribed English text from the attached audio",
+                        "Verbatim transcribed English text for this 5-10s segment",
                     },
                   },
                   required: ["id", "start", "end", "speaker", "text"],
@@ -197,7 +195,7 @@ export async function POST(req: NextRequest) {
               idioms: {
                 type: Type.ARRAY,
                 description:
-                  "Important idioms and multi-word expressions appearing verbatim in the transcript",
+                  "All phrasal verbs, idioms, set phrases, and collocations appearing in the episode, written in the EXACT surface form as they appear in segments[].text",
                 items: {
                   type: Type.STRING,
                 },
